@@ -198,6 +198,7 @@
     .metric-item { display: flex; flex-direction: column; }
     .metric-label { font-size: 0.72rem; color: var(--text-muted); }
     .metric-val { font-weight: 700; color: #f8fafc; }
+    .missing-val { color: var(--gold); font-size: 0.78rem; font-weight: 600; }
     .sub-info {
       font-size: 0.8rem;
       color: var(--text-muted);
@@ -335,6 +336,7 @@
 
   <script>
     const STORAGE_KEY = 'dark_sky_spots_pure_v1';
+    const OLD_STORAGE_KEY = 'dark_sky_spots_v1';
 
     const defaultSpots = [
       {
@@ -353,17 +355,52 @@
 
     let spots = loadSpots();
 
-    function loadSpots() {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultSpots));
-        return [...defaultSpots];
-      }
+    function migrateOldData(rawOld) {
       try {
-        return JSON.parse(raw);
+        const oldList = JSON.parse(rawOld);
+        if (!Array.isArray(oldList) || oldList.length === 0) return null;
+        return oldList.map(item => ({
+          id: item.id || ('spot-' + Date.now() + Math.random()),
+          name: item.name || '名称未設定',
+          coords: item.coords || '',
+          sqm: typeof item.sqm === 'number' ? item.sqm : (parseFloat(item.sqm) || 21.0),
+          brightness: item.brightness !== undefined && item.brightness !== null ? Number(item.brightness) : null,
+          artif: item.artif !== undefined && item.artif !== null ? Number(item.artif) : null,
+          ratio: typeof item.ratio === 'number' ? item.ratio : (parseFloat(item.ratio) || 0),
+          bortle: item.bortle !== undefined && item.bortle !== null ? String(item.bortle) : '',
+          elevation: item.elevation !== undefined && item.elevation !== null && item.elevation !== '' ? Number(item.elevation) : null,
+          memo: item.memo || ''
+        }));
       } catch (e) {
-        return [...defaultSpots];
+        return null;
       }
+    }
+
+    function loadSpots() {
+      const rawNew = localStorage.getItem(STORAGE_KEY);
+      const rawOld = localStorage.getItem(OLD_STORAGE_KEY);
+
+      let parsedNew = null;
+      if (rawNew) {
+        try { parsedNew = JSON.parse(rawNew); } catch (e) {}
+      }
+
+      // 新ストレージが空、またはサンプル1件のみの場合は旧データからの自動引き継ぎを実行
+      const isOnlySample = Array.isArray(parsedNew) && parsedNew.length === 1 && parsedNew[0].id === 'sample-1';
+      if ((!parsedNew || isOnlySample) && rawOld) {
+        const migrated = migrateOldData(rawOld);
+        if (migrated && migrated.length > 0) {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+          return migrated;
+        }
+      }
+
+      if (Array.isArray(parsedNew)) {
+        return parsedNew;
+      }
+
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(defaultSpots));
+      return [...defaultSpots];
     }
 
     function persistSpots() {
@@ -374,23 +411,22 @@
       return Math.max(min, Math.min(max, val));
     }
 
-    // 純粋な光学・光害4指標のみで100点満点を計算
+    function isValidNum(v) {
+      return v !== null && v !== undefined && v !== '' && !isNaN(Number(v));
+    }
+
     function calcDetails(s) {
-      // SQM: 21.00(0点) 〜 22.00(40点)
-      const pSqm = clamp(((s.sqm - 21.00) / (22.00 - 21.00)) * 40, 0, 40);
-      // Brightness: 0.400(0点) 〜 0.170(20点)
-      const pBright = clamp(((0.400 - s.brightness) / (0.400 - 0.170)) * 20, 0, 20);
-      // Artif. bright.: 200(0点) 〜 0(20点)
-      const pArtif = clamp(((200 - s.artif) / 200) * 20, 0, 20);
-      // Ratio: 1.000(0点) 〜 0.000(20点)
-      const pRatio = clamp(((1.000 - s.ratio) / 1.000) * 20, 0, 20);
+      const pSqm = isValidNum(s.sqm) ? clamp(((Number(s.sqm) - 21.00) / (22.00 - 21.00)) * 40, 0, 40) : 0;
+      const pBright = isValidNum(s.brightness) ? clamp(((0.400 - Number(s.brightness)) / (0.400 - 0.170)) * 20, 0, 20) : 0;
+      const pArtif = isValidNum(s.artif) ? clamp(((200 - Number(s.artif)) / 200) * 20, 0, 20) : 0;
+      const pRatio = isValidNum(s.ratio) ? clamp(((1.000 - Number(s.ratio)) / 1.000) * 20, 0, 20) : 0;
 
       const total = pSqm + pBright + pArtif + pRatio;
       return {
         total: Math.round(total * 10) / 10,
         pSqm: pSqm.toFixed(1),
-        pBright: pBright.toFixed(1),
-        pArtif: pArtif.toFixed(1),
+        pBright: isValidNum(s.brightness) ? pBright.toFixed(1) : '-',
+        pArtif: isValidNum(s.artif) ? pArtif.toFixed(1) : '-',
         pRatio: pRatio.toFixed(1)
       };
     }
@@ -398,11 +434,11 @@
     function escapeHtml(str) {
       if (str === null || str === undefined) return '';
       return String(str)
-        .replace(/&/g, '&')
-        .replace(/</g, '<')
-        .replace(/>/g, '>')
-        .replace(/"/g, '"')
-        .replace(/'/g, ''');
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
     }
 
     function saveSpot(e) {
@@ -441,12 +477,12 @@
       document.getElementById('editId').value = s.id;
       document.getElementById('name').value = s.name;
       document.getElementById('coords').value = s.coords || '';
-      document.getElementById('sqm').value = s.sqm;
-      document.getElementById('brightness').value = s.brightness;
-      document.getElementById('artif').value = s.artif;
-      document.getElementById('ratio').value = s.ratio;
+      document.getElementById('sqm').value = isValidNum(s.sqm) ? s.sqm : '';
+      document.getElementById('brightness').value = isValidNum(s.brightness) ? s.brightness : '';
+      document.getElementById('artif').value = isValidNum(s.artif) ? s.artif : '';
+      document.getElementById('ratio').value = isValidNum(s.ratio) ? s.ratio : '';
       document.getElementById('bortle').value = s.bortle || '';
-      document.getElementById('elevation').value = s.elevation !== null ? s.elevation : '';
+      document.getElementById('elevation').value = isValidNum(s.elevation) ? s.elevation : '';
       document.getElementById('memo').value = s.memo || '';
 
       document.getElementById('formTitle').textContent = '観測地データの編集';
@@ -475,11 +511,19 @@
       const enriched = spots.map(s => ({ ...s, detail: calcDetails(s) }));
 
       enriched.sort((a, b) => {
-        if (sortBy === 'sqm') return b.sqm - a.sqm; // 高いほど暗い
-        if (sortBy === 'brightness') return a.brightness - b.brightness; // 低いほど暗い
-        if (sortBy === 'artif') return a.artif - b.artif; // 低いほど暗い
-        if (sortBy === 'ratio') return a.ratio - b.ratio; // 低いほど暗い
-        return b.detail.total - a.detail.total; // 総合スコア高い順
+        if (sortBy === 'sqm') return (b.sqm || 0) - (a.sqm || 0);
+        if (sortBy === 'brightness') {
+          const av = isValidNum(a.brightness) ? Number(a.brightness) : 9999;
+          const bv = isValidNum(b.brightness) ? Number(b.brightness) : 9999;
+          return av - bv;
+        }
+        if (sortBy === 'artif') {
+          const av = isValidNum(a.artif) ? Number(a.artif) : 999999;
+          const bv = isValidNum(b.artif) ? Number(b.artif) : 999999;
+          return av - bv;
+        }
+        if (sortBy === 'ratio') return (a.ratio || 999) - (b.ratio || 999);
+        return b.detail.total - a.detail.total;
       });
 
       document.getElementById('spotCount').textContent = enriched.length;
@@ -491,13 +535,21 @@
         const rankClass = rank <= 3 ? `rank-${rank}` : '';
         const d = s.detail;
 
+        const brightDisp = isValidNum(s.brightness)
+          ? `<span class="metric-val">${s.brightness}</span>`
+          : `<span class="missing-val">未入力（編集で追加）</span>`;
+
+        const artifDisp = isValidNum(s.artif)
+          ? `<span class="metric-val">${s.artif}</span>`
+          : `<span class="missing-val">未入力（編集で追加）</span>`;
+
         const mapHtml = s.coords
           ? `<a class="map-link" href="https://www.google.com/maps?q=${encodeURIComponent(s.coords)}" target="_blank" rel="noopener">📍 Googleマップで開く (${escapeHtml(s.coords)})</a>`
           : `<span style="color:var(--text-muted)">座標未登録</span>`;
 
         const refParts = [];
         if (s.bortle) refParts.push(`Bortle: Class ${escapeHtml(s.bortle)}`);
-        if (s.elevation !== null && s.elevation !== undefined && s.elevation !== '') refParts.push(`標高: ${escapeHtml(s.elevation)}m`);
+        if (isValidNum(s.elevation)) refParts.push(`標高: ${escapeHtml(s.elevation)}m`);
         const subInfoHtml = refParts.length > 0
           ? `<div class="sub-info">参考データ（採点外）：${refParts.join(' / ')}</div>`
           : '';
@@ -524,15 +576,15 @@
             <div class="metrics-grid">
               <div class="metric-item">
                 <span class="metric-label">SQM (mag/arcsec²)</span>
-                <span class="metric-val">${s.sqm.toFixed(2)}</span>
+                <span class="metric-val">${Number(s.sqm).toFixed(2)}</span>
               </div>
               <div class="metric-item">
                 <span class="metric-label">Brightness (mcd/m²)</span>
-                <span class="metric-val">${s.brightness}</span>
+                ${brightDisp}
               </div>
               <div class="metric-item">
                 <span class="metric-label">Artif. bright. (μcd/m²)</span>
-                <span class="metric-val">${s.artif}</span>
+                ${artifDisp}
               </div>
               <div class="metric-item">
                 <span class="metric-label">Ratio</span>
